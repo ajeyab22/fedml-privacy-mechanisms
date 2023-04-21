@@ -30,6 +30,7 @@ class SimulatorSingleProcess:
         from .sp.turboaggregate.TA_trainer import TurboAggregateTrainer
 
         if args.federated_optimizer == FedML_FEDERATED_OPTIMIZER_FEDAVG:
+            
             self.fl_trainer = FedAvgAPI(args, device, dataset, model)
             #self.fl_trainer = fedml.simulation.sp.fedavg.fedavg_cluster.fedavg_cluster_api(args, device, dataset, model)
         elif args.federated_optimizer == FedML_FEDERATED_OPTIMIZER_FEDOPT:

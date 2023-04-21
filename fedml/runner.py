@@ -46,7 +46,6 @@ class FedMLRunner:
     ):
         if hasattr(args, "backend") and args.backend == FEDML_SIMULATION_TYPE_SP:
             from .simulation.simulator import SimulatorSingleProcess
-
             runner = SimulatorSingleProcess(
                 args, device, dataset, model, client_trainer, server_aggregator
             )
