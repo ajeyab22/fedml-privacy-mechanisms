@@ -75,7 +75,7 @@ class FedAvgAPI(object):
 
         self.tier_accuracy= [0, 0, 0]
         self.tier_accuracy_prev= [0, 0, 0]
-        self.new_prob=[0.33,0.33,0.33]
+        self.new_prob = [1,0.01,0.01]
         
         # Specify ratio for credits of each tier below
         # The first 2 parameters are used. Remaining credits from comm_round are assgined to last
@@ -95,7 +95,7 @@ class FedAvgAPI(object):
 
         # The below parameter is to divide the clients into tiers based on their data size
         # If a client has data size between threshold[1] (exclusive) and threshold[2] (invlusive), it is medium
-        self.threshold = [0, 100, 500]
+        self.threshold = [0, 20, 80]
 
         for client_idx in range(self.client_total):
             if (self.train_data_local_num_dict[client_idx] <= self.threshold[1]):
@@ -210,9 +210,9 @@ class FedAvgAPI(object):
             if round_idx%self.update_prob==0 and round_idx>=self.update_prob:
                 logging.info("Previous tierwise accuracies = %s" % str(self.tier_accuracy_prev))
                 logging.info("Current tierwise accuracies = %s" % str(self.tier_accuracy))
-                if self.tier_accuracy[self.selected_tier]<=self.tier_accuracy_prev[self.selected_tier]:
+                if self.tier_accuracy[self.selected_tier]>self.tier_accuracy_prev[self.selected_tier]:
                     logging.info("Tier probabilities updating")
-                    self.change_probs(self.tier_accuracy)
+                    self.change_probs(copy.deepcopy(self.tier_accuracy))
                 else:
                     logging.info("Tier probabilities do not need update")
                 self.tier_accuracy_prev = copy.deepcopy(self.tier_accuracy)
@@ -325,20 +325,20 @@ class FedAvgAPI(object):
         plt.show()
 
     def argsort(self,seq):
-        return [x for x, y in sorted(enumerate(seq), key=lambda x: x[1])]
+        result = [x for x, y in sorted(enumerate(seq), key=lambda x: x[1])]
+        return result
 
     def change_probs(self,tier_acc):
 
         #num_tier=3-self.credits.count(0)
         num_tier=3
-        A=self.argsort(tier_acc)
+        array = []
+        for i in range(num_tier):
+            array.append(tier_acc[i])
+        A = self.argsort(array)
+        print("Dream FEDML: ",tier_acc, A)
         D=num_tier*(num_tier+1)/2
 
-        '''if num_tier==1:
-            pos = [idx for idx, val in enumerate(self.credits) if val != 0][0]
-            self.new_prob=[0,0,0]
-            self.new_prob[pos]=1
-        else:'''
         for i in range(1, num_tier+1):
             self.new_prob[A[i - 1]] = (num_tier - i +1) / D
 
