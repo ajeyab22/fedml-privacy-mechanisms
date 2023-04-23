@@ -4,8 +4,6 @@ import random
 
 import numpy as np
 import torch
-import torch.nn as nn
-from torchsummary import summary
 import wandb
 
 from fedml import mlops
@@ -17,45 +15,9 @@ import subprocess
 import glob
 from os import path
 
-import pandas as pd
-import seaborn as sns
-from matplotlib import pyplot as plt
-
-
-
-class CNN(torch.nn.Module):
-
-    def __init__(self,perf_coeff, only_digits=True):
-
-        super(CNN, self).__init__()
-        self.conv2d_1 = torch.nn.Conv2d(1,int(32*perf_coeff), kernel_size=3)
-        self.max_pooling = nn.MaxPool2d(2, stride=2)
-        self.conv2d_2 = torch.nn.Conv2d(int(perf_coeff*32),int( perf_coeff*64), kernel_size=3)
-        self.dropout_1 = nn.Dropout(0.25)
-        self.flatten = nn.Flatten()
-        self.linear_1 = nn.Linear(int(perf_coeff*9216), int(perf_coeff*128))
-        self.dropout_2 = nn.Dropout(0.5)
-        self.linear_2 = nn.Linear(int(perf_coeff*128), 10 if only_digits else 62)
-        self.relu = nn.ReLU()
-        # self.softmax = nn.Softmax(dim=1)
-
-    def forward(self, x):
-        x = torch.unsqueeze(x, 1)
-        x = self.conv2d_1(x)
-        x = self.relu(x)
-        x = self.conv2d_2(x)
-        x = self.relu(x)
-        x = self.max_pooling(x)
-        x = self.dropout_1(x)
-        x = self.flatten(x)
-        x = self.linear_1(x)
-        x = self.relu(x)
-        x = self.dropout_2(x)
-        x = self.linear_2(x)
-        # x = self.softmax(self.linear_2(x))
-        return x
-
-
+# import pandas as pd
+# import seaborn as sns
+# from matplotlib import pyplot as plt
 
 
 class FedAvgAPI(object):
@@ -78,6 +40,10 @@ class FedAvgAPI(object):
         self.train_data_num_in_total = train_data_num
         self.test_data_num_in_total = test_data_num
 
+        # The below one stores client ids based their dataset size specified in threshold
+        self.client_tier_dict = {'H':[], 'M':[], 'L':[] }
+
+        # For each client, its tier is mentioned below
         self.client_type_list=[]
 
         self.client_list = []
@@ -85,10 +51,10 @@ class FedAvgAPI(object):
         self.train_data_local_dict = train_data_local_dict
         self.test_data_local_dict = test_data_local_dict
 
-        self.global_rounds=101
-        self.client_total=self.args.client_num_in_total
+        self.global_rounds = self.args.comm_round
+        self.client_total = self.args.client_num_in_total
 
-        self.init=0
+        self.init = 0
         self.counter=[0,0,0]
 
         self.client_select_count ={}
@@ -105,51 +71,78 @@ class FedAvgAPI(object):
             self.round_loss[i] = []
             self.round_acc[i] = []
 
-        self.tier_accuracy=[0,0,0]
-        self.tier_accuracy_prev=[0,0,0]
+        self.num_tier = 3
+
+        self.tier_accuracy= [0, 0, 0]
+        self.tier_accuracy_prev= [0, 0, 0]
         self.new_prob=[0.33,0.33,0.33]
-        self.credits=[21,50,30]
-        self.update_prob=5
-        self.tier=[0,1,2]
+        
+        # Specify ratio for credits of each tier below
+        # The first 2 parameters are used. Remaining credits from comm_round are assgined to last
+        self.credits_ratio = [0.5, 0.3, 0.2]
+
+        print("DreamFEDML: The given credits ratio is ", self.credits_ratio)
+        self.credits = list(map(lambda x: int(x*self.global_rounds), self.credits_ratio))
+        
+        self.credits[-1] = self.global_rounds - sum(self.credits[:-1])
+
+        print("DreamFEDML: The given credits are ", self.credits," for total ", self.global_rounds)
+        
+        # The below parameter is to check for update prob based on config file value
+        self.update_prob = self.args.frequency_of_the_test
+        self.tier = [0,1,2]
         self.selected_tier=0
 
+        # The below parameter is to divide the clients into tiers based on their data size
+        # If a client has data size between threshold[1] (exclusive) and threshold[2] (invlusive), it is medium
+        self.threshold = [0, 100, 500]
 
+        for client_idx in range(self.client_total):
+            if (self.train_data_local_num_dict[client_idx] <= self.threshold[1]):
+                self.client_type_list.append('H')
+            elif (self.train_data_local_num_dict[client_idx] > self.threshold[2]):
+                self.client_type_list.append('L')
+            else:
+                self.client_type_list.append('M')   
+            self.client_tier_dict[self.client_type_list[client_idx]].append(client_idx)
 
-        #model = CNN(0.5, False)
+        print("Dream FEDML: Number of High clients: ", len(self.client_tier_dict['H']),\
+               " and are ", self.client_tier_dict['H'])
+        
+        print("Dream FEDML: Number of Medium clients: ", len(self.client_tier_dict['M']),\
+               " and are ", self.client_tier_dict['M'])
+        
+        print("Dream FEDML: Number of Slow clients: ", len(self.client_tier_dict['L']),\
+               " and are ", self.client_tier_dict['L'])
+
         logging.info("model = {}".format(model))
-        logging.info("Orignal model")
+
         self.model_trainer = create_model_trainer(model, args)
         self.model = model
         logging.info("self.model_trainer = {}".format(self.model_trainer))
 
-        '''self._setup_clients(
+        self._setup_clients(
             train_data_local_num_dict, train_data_local_dict, test_data_local_dict, self.model_trainer,
-        )'''
+        )
 
     def _setup_clients(
-        self, perf_coeff,client_list,train_data_local_num_dict, train_data_local_dict, test_data_local_dict, #model_trainer,
+        self, train_data_local_num_dict, train_data_local_dict, test_data_local_dict, model_trainer,
     ):
-        model=CNN(perf_coeff,False)
-        self.model=model
-        #logging.info("model = {}".format(model))
-        self.model_trainer = create_model_trainer(model, self.args)
-        #logging.info("############setup_clients (START)#############")
-        client_idx=client_list
-        #for client_idx in client_list:#range(self.args.client_num_per_round): #needs to be modified for number of clients in a round
-        c = Client(
-            client_idx,
-            train_data_local_dict[client_idx],
-            test_data_local_dict[client_idx],
-            train_data_local_num_dict[client_idx],
-            self.args,
-            self.device,
-            self.model_trainer,
-        )
-        self.client_list.append(c)
+        logging.info("############setup_clients (START)#############")
+        for client_idx in range(self.args.client_num_per_round):
+            c = Client(
+                client_idx,
+                train_data_local_dict[client_idx],
+                test_data_local_dict[client_idx],
+                train_data_local_num_dict[client_idx],
+                self.args,
+                self.device,
+                model_trainer,
+            )
+            self.client_list.append(c)
+        logging.info("############setup_clients (END)#############")
 
-        #logging.info("############setup_clients (END)#############")
 
-    # modified by akshat
     def train(self):
         logging.info("self.model_trainer = {}".format(self.model_trainer))
         w_global = self.model_trainer.get_model_params()
@@ -167,124 +160,45 @@ class FedAvgAPI(object):
             Instead of changing the 'Client' instances, our implementation keeps the 'Client' instances and then updates their local dataset 
             """
             client_num_in_total=self.args.client_num_in_total
-            num_tier=3
-
-            if round_idx%self.update_prob==0 and round_idx>=self.update_prob:
-                logging.info("Previous tierwise accuracies = %s" % str(self.tier_accuracy_prev))
-                logging.info("Current tierwise accuracies = %s" % str(self.tier_accuracy))
-                if self.tier_accuracy[self.selected_tier]<=self.tier_accuracy_prev[self.selected_tier]:
-                    logging.info("Tier probabilities updating")
-                    tier_acc_copy=[]
-                    tier_acc_copy=self.tier_accuracy
-                    self.change_probs(tier_acc_copy)
-                else:
-                    logging.info("Tier probabilities do not need update")
-                self.tier_accuracy_prev = self.tier_accuracy
-                self.tier_accuracy=[0,0,0]
-
+            
+            num_tier=self.num_tier
 
             client_indexes = self._client_sampling(
-                round_idx,self.client_total
-                , self.args.client_num_per_round   #needs to be modified for total and round client numbers
+                round_idx, self.client_total, self.args.client_num_per_round
             )
-            print("Line 190", client_indexes)
 
+            logging.info("client_indexes = " + str(client_indexes))
 
-            #modifications for clustering
-
-            device_type_info=['High','Medium','Low']
-
-            dev_epoch={0:5,1:3,2:1}
-            client=self.client_list
-            idx=0
-            cluster_sample_num=0
-            w_cluster_global=[]
-            client_temp=[]
-            l=0
-
-            logging.info("Device type under training: %s" % str(device_type_info[self.selected_tier]))
-            for client_idx in client_indexes:
-                if round_idx != self.global_rounds - 1:
-                    self.client_select_count[client_idx] += 1
-                #client_temp.append(client_idx)
-                for i in range(dev_epoch[self.selected_tier]):
-                    client[client_idx].update_local_dataset(
-                        client_idx,
-                        self.train_data_local_dict[client_idx],
-                        self.test_data_local_dict[client_idx],
-                        self.train_data_local_num_dict[client_idx],
-                    )
-                    # train on new dataset
-                    mlops.event("train", event_started=True,
-                                event_value="{}_{}".format(str(round_idx), str(idx)))
-                    # print((list(w_global)))
-
-                    w = client[client_idx].train(copy.deepcopy(w_global))
-                    # self.loss_dict[client_idx].append(l)
-                    # logging.info(l)
-                    mlops.event("train", event_started=False,
-                                event_value="{}_{}".format(str(round_idx), str(idx)))
-                    # self.logging.info("local weights = " + str(w))
-                    # logging.info(client[idx].get_sample_number())
-                    cluster_sample_num += client[client_idx].get_sample_number()
-                    w_locals.append((client[client_idx].get_sample_number(), copy.deepcopy(w)))
-                    idx += 1
-                self.loss_dict[client_idx].append(l)
-
-
-            cluster_sample_num = 0
-
-
+            for idx, client in enumerate(self.client_list):
+                # To ensure that idx is within client_indexes
+                if idx >= len(client_indexes):
+                    break
                 # update dataset
-            #logging.info(client_temp)
+                client_idx = client_indexes[idx]
+                client.update_local_dataset(
+                    client_idx,
+                    self.train_data_local_dict[client_idx],
+                    self.test_data_local_dict[client_idx],
+                    self.train_data_local_num_dict[client_idx],
+                )
 
-
+                # train on new dataset
+                mlops.event("train", event_started=True, event_value="{}_{}".format(str(round_idx), str(idx)))
+                w = client.train(copy.deepcopy(w_global))
+                mlops.event("train", event_started=False, event_value="{}_{}".format(str(round_idx), str(idx)))
+                # self.logging.info("local weights = " + str(w))
+                w_locals.append((client.get_sample_number(), copy.deepcopy(w)))
 
             # update global weights
             mlops.event("agg", event_started=True, event_value=str(round_idx))
-            #logging.info(np.shape(w_locals))
             w_global = self._aggregate(w_locals)
+
             self.model_trainer.set_model_params(w_global)
             mlops.event("agg", event_started=False, event_value=str(round_idx))
 
-            sum_data_point=0
-            sum_correct=0
-            sum_loss=0
-
-            for client_idx in self.loss_dict.keys():
-                metrics = client[client_idx].local_test(False)
-                sum_data_point+=metrics["test_total"]
-                sum_correct+=metrics["test_correct"]
-                sum_loss+=metrics["test_loss"]
-                self.loss_dict[client_idx].append(metrics["test_loss"]/metrics["test_total"])
-                self.acc_dict[client_idx].append(metrics["test_correct"] / metrics["test_total"])
-                self.round_loss[round_idx].append(metrics["test_loss"]/metrics["test_total"])
-                self.round_acc[round_idx].append(metrics["test_correct"] / metrics["test_total"])
-                if round_idx%(self.update_prob-1)==0 and round_idx>=(self.update_prob-1):
-                    if self.client_type_list[client_idx] == 'H':
-                        self.tier_accuracy[0] += (metrics["test_correct"] / metrics["test_total"])
-                    elif self.client_type_list[client_idx] == 'M':
-                        self.tier_accuracy[1] += (metrics["test_correct"] / metrics["test_total"])
-                    elif self.client_type_list[client_idx] == 'L':
-                        self.tier_accuracy[2] += (metrics["test_correct"] / metrics["test_total"])
-
-            if round_idx % (self.update_prob - 1) == 0 and round_idx >= (self.update_prob - 1):
-                self.tier_accuracy[0] /= int(0.2 * client_num_in_total)
-                self.tier_accuracy[1] /= int(0.5 * client_num_in_total)
-                self.tier_accuracy[2] /= int(0.3 * client_num_in_total)
-
-            train_loss=sum_loss/sum_data_point
-            train_acc=sum_correct/sum_data_point
-            logging.info("Training Loss = %s" %str(train_loss))
-            logging.info("Training Accuracy = %s" % str(train_acc))
-
-
-
-
-
             # test results
             # at last round
-            '''if round_idx == self.args.comm_round - 1:
+            if round_idx == self.args.comm_round - 1:
                 self._local_test_on_all_clients(round_idx)
             # per {frequency_of_the_test} round
             elif round_idx % self.args.frequency_of_the_test == 0:
@@ -293,118 +207,62 @@ class FedAvgAPI(object):
                 else:
                     self._local_test_on_all_clients(round_idx)
 
-            mlops.log_round_info(self.args.comm_round, round_idx)'''
-        #logging.info(self.loss_dict)
+            if round_idx%self.update_prob==0 and round_idx>=self.update_prob:
+                logging.info("Previous tierwise accuracies = %s" % str(self.tier_accuracy_prev))
+                logging.info("Current tierwise accuracies = %s" % str(self.tier_accuracy))
+                if self.tier_accuracy[self.selected_tier]<=self.tier_accuracy_prev[self.selected_tier]:
+                    logging.info("Tier probabilities updating")
+                    self.change_probs(self.tier_accuracy)
+                else:
+                    logging.info("Tier probabilities do not need update")
+                self.tier_accuracy_prev = copy.deepcopy(self.tier_accuracy)
+                self.tier_accuracy= [0,0,0]
 
+            mlops.log_round_info(self.args.comm_round, round_idx)
 
-
-
-        filename1='log_loss.txt'
-        filename2 = 'log_acc.txt'
-
-        f = open(filename1, 'w')
-        
-        f.write(str(self.round_loss))
-        f.close()
-        f = open(filename2, 'w')
-        f.write(str(self.round_acc))
-        f.close()
-        #print(len(self.round_loss),len(self.round_acc))
-        #self.plot(self.round_loss,self.round_acc,self.client_select_count)
-
-
-
+        print("DreamFEDML: Line 126 Model: "+str(self.args.model)+" Dataset: "\
+              +str(self.args.dataset)+" Feature size of local weight: " + str(len(w_locals[0][1])))
         mlops.log_training_finished_status()
         mlops.log_aggregation_finished_status()
-    # modified by akshat
+
+
+        # filename1='log_loss.txt'
+        # filename2 = 'log_acc.txt'
+
+        # f = open(filename1, 'w')
+        
+        # f.write(str(self.round_loss))
+        # f.close()
+        # f = open(filename2, 'w')
+        # f.write(str(self.round_acc))
+        # f.close()
+        # #print(len(self.round_loss),len(self.round_acc))
+        # #self.plot(self.round_loss,self.round_acc,self.client_select_count)
 
     def _client_sampling(self, round_idx, client_num_in_total, client_num_per_round):
-        client_high_num = int(0.2 * client_num_in_total)
-        client_medium_num = int(0.5 * client_num_in_total)
-        client_low_num = int(0.3 * client_num_in_total)
+        tier = copy.deepcopy(self.tier)
+        probs = copy.deepcopy(self.new_prob)
+        types = ['H', 'M', 'L']
 
-        if self.init==0:
-            self.init=1
-            for i in range(client_high_num):
-                self.client_type_list.append('H')
-            for i in range(client_medium_num):
-                self.client_type_list.append('M')
-            for i in range(client_low_num):
-                self.client_type_list.append('L')
-            np.random.seed(0)
-            np.random.shuffle(self.client_type_list)
+        random.seed(round_idx)
 
-            c=0
-            logging.info("Setting up clients")
-            for i in self.client_type_list:
-                if i=='H':
-                    self._setup_clients(1, c, self.train_data_local_num_dict, self.train_data_local_dict,
-                                        self.test_data_local_dict)
-                elif i=='M':
-                    self._setup_clients(1, c, self.train_data_local_num_dict,
-                                        self.train_data_local_dict,
-                                        self.test_data_local_dict)
-                elif i=='L':
-                    self._setup_clients(1, c, self.train_data_local_num_dict,
-                                        self.train_data_local_dict,
-                                        self.test_data_local_dict)
-                c+=1
-
-            logging.info("Client setup completed")
-
-        logging.info("client_configurations= %s" % str(self.client_type_list))
-        client_high = [i for i, x in enumerate(self.client_type_list) if x == 'H']
-        client_medium = [i for i,x in enumerate(self.client_type_list) if x=='M']
-        client_low = [i for i, x in enumerate(self.client_type_list) if x == 'L']
-
-        if client_num_in_total == client_num_per_round:
-            client_indexes = [client_index for client_index in range(client_num_in_total)]
-        else:
-            num_clients = min(client_num_per_round, client_num_in_total)
-            tier_dict={0:client_high,1:client_medium,2:client_low}
-            tier_name={0:"High",1:"Medium",2:"Low"}
-            tier_count={0:client_high_num,1:client_medium_num,2:client_low_num}
-            tier_ratio={0:0.2,1:0.5,2:0.3}
-            #random.seed(round_idx)  # make sure for each comparison, we are selecting the same clients each round
-            #client_indexes = [random.sample(client_high,int(0.2*num_clients)),random.sample(client_medium,int(0.5*num_clients)),random.sample(client_low,int(0.3*num_clients))]
-
-            while True:
-                self.selected_tier = random.choices([0, 1, 2], weights=self.new_prob, k=1)[0]
-                logging.info(self.new_prob)
+        while True:
+                self.selected_tier = random.choices(tier, weights=probs, k=1)[0]
+                # logging.info(self.new_prob)
                 if self.credits[self.selected_tier]!=0:
                     break
                 else:
-                    logging.info("Insufficient credits for tier %s" %str(tier_name[self.selected_tier]))
-            client_indexes=random.sample(tier_dict[self.selected_tier],client_num_per_round)
-            '''idx = (self.counter[self.selected_tier]*client_num_per_round)% tier_count[self.selected_tier]
-            client_indexes=tier_dict[self.selected_tier][idx:idx+client_num_per_round]
-            self.counter[self.selected_tier]+=1'''
-            self.credits[self.selected_tier]-=1
-
-
-        logging.info("Tier selected= %s" % str(tier_name[self.selected_tier]))
+                    # logging.info("Insufficient credits for tier %s" %str(tier_name[self.selected_tier]))
+                    del_index = tier.index(self.selected_tier)
+                    del tier[del_index]
+                    del probs[del_index]
+        
+        num_clients = min(client_num_per_round, len(self.client_tier_dict[types[self.selected_tier]]))
+        np.random.seed(round_idx)  # make sure for each comparison, we are selecting the same clients each round
+        client_indexes = np.random.choice(self.client_tier_dict[types[self.selected_tier]], num_clients, replace=False)
+        print("Selected tier for round ", round_idx, " is ", types[self.selected_tier])
         logging.info("client_indexes = %s" % str(client_indexes))
-        '''client_indexes=[i for j in client_indexes for i in j]
-        idx = client_indexes
-        client_type_list_selected = np.array(client_type_list)[idx].tolist()
-        logging.info(client_type_list_selected)
-        logging.info("Client type count:")
-        logging.info("High = %d" % int(client_type_list_selected.count('H')))
-        logging.info("Medium = %d" % int(client_type_list_selected.count('M')))
-        logging.info("Low = %d" % int(client_type_list_selected.count('L')))
-        # return high,medium and low indexes seperately or as list of list
-        id_high = [i for i, x in enumerate(client_type_list_selected) if x == 'H']
-        id_medium = [i for i, x in enumerate(client_type_list_selected) if x == 'M']
-        id_low = [i for i, x in enumerate(client_type_list_selected) if x == 'L']
-        client_high = np.array(client_indexes)[id_high].tolist()
-        client_medium = np.array(client_indexes)[id_medium].tolist()
-        client_low = np.array(client_indexes)[id_low].tolist()
-        logging.info("Client ids by type:")
-        logging.info("High devices = %s" % str(client_high))
-        logging.info("Medium devices = %s" % str(client_medium))
-        logging.info("Low devices = %s" % str(client_low))
-        client_indexes_by_type = [client_high, client_medium, client_low]
-        # logging.info(client_indexes_by_type)'''
+        self.credits[self.selected_tier] -= 1
         return client_indexes
 
     def plot(self, loss_list, acc_list,count_list):
@@ -486,8 +344,6 @@ class FedAvgAPI(object):
 
         logging.info("Updated tier probabilities = %s" % str(self.new_prob))
 
-
-
     def _generate_validation_set(self, num_samples=10000):
         test_data_num = len(self.test_global.dataset)
         sample_indices = random.sample(range(test_data_num), min(num_samples, test_data_num))
@@ -531,36 +387,71 @@ class FedAvgAPI(object):
 
         logging.info("################local_test_on_all_clients : {}".format(round_idx))
 
-        train_metrics = {"num_samples": [], "num_correct": [], "losses": []}
+        types = ['H', 'M', 'L']
 
-        test_metrics = {"num_samples": [], "num_correct": [], "losses": []}
+        train_acc_tier = {}
+        test_acc_tier = {}
 
-        client = self.client_list[0]
+        train_loss_tier = {}
+        test_loss_tier = {}
 
-        for client_idx in range(self.args.client_num_in_total):
-            """
-            Note: for datasets like "fed_CIFAR100" and "fed_shakespheare",
-            the training client number is larger than the testing client number
-            """
-            if self.test_data_local_dict[client_idx] is None:
-                continue
-            client.update_local_dataset(
-                0,
-                self.train_data_local_dict[client_idx],
-                self.test_data_local_dict[client_idx],
-                self.train_data_local_num_dict[client_idx],
-            )
-            # train data
-            train_local_metrics = client.local_test(False)
-            train_metrics["num_samples"].append(copy.deepcopy(train_local_metrics["test_total"]))
-            train_metrics["num_correct"].append(copy.deepcopy(train_local_metrics["test_correct"]))
-            train_metrics["losses"].append(copy.deepcopy(train_local_metrics["test_loss"]))
+        tier_train_metrics = {"num_samples": [], "num_correct": [], "losses": []}
 
-            # test data
-            test_local_metrics = client.local_test(True)
-            test_metrics["num_samples"].append(copy.deepcopy(test_local_metrics["test_total"]))
-            test_metrics["num_correct"].append(copy.deepcopy(test_local_metrics["test_correct"]))
-            test_metrics["losses"].append(copy.deepcopy(test_local_metrics["test_loss"]))
+        tier_test_metrics = {"num_samples": [], "num_correct": [], "losses": []}
+
+        for tier in self.tier:
+
+            train_metrics = {"num_samples": [], "num_correct": [], "losses": []}
+
+            test_metrics = {"num_samples": [], "num_correct": [], "losses": []}
+
+            client = self.client_list[0]
+
+            for client_idx in self.client_tier_dict[types[tier]]:
+                """
+                Note: for datasets like "fed_CIFAR100" and "fed_shakespheare",
+                the training client number is larger than the testing client number
+                """
+                if self.test_data_local_dict[client_idx] is None:
+                    continue
+                client.update_local_dataset(
+                    0,
+                    self.train_data_local_dict[client_idx],
+                    self.test_data_local_dict[client_idx],
+                    self.train_data_local_num_dict[client_idx],
+                )
+                # train data
+                train_local_metrics = client.local_test(False)
+                train_metrics["num_samples"].append(copy.deepcopy(train_local_metrics["test_total"]))
+                train_metrics["num_correct"].append(copy.deepcopy(train_local_metrics["test_correct"]))
+                train_metrics["losses"].append(copy.deepcopy(train_local_metrics["test_loss"]))
+
+                # test data
+                test_local_metrics = client.local_test(True)
+                test_metrics["num_samples"].append(copy.deepcopy(test_local_metrics["test_total"]))
+                test_metrics["num_correct"].append(copy.deepcopy(test_local_metrics["test_correct"]))
+                test_metrics["losses"].append(copy.deepcopy(test_local_metrics["test_loss"]))
+            
+            # test on training dataset of tier
+            train_acc_tier[tier] = sum(train_metrics["num_correct"]) / sum(train_metrics["num_samples"])
+            train_loss_tier[tier] = sum(train_metrics["losses"]) / sum(train_metrics["num_samples"])
+
+            self.tier_accuracy = copy.deepcopy(train_acc_tier)
+
+            # test on test dataset of tier
+            test_acc_tier[tier] = sum(test_metrics["num_correct"]) / sum(test_metrics["num_samples"])
+            test_loss_tier[tier] = sum(test_metrics["losses"]) / sum(test_metrics["num_samples"])
+
+            tier_train_metrics["num_samples"].extend(train_metrics["num_samples"])
+            tier_train_metrics["num_correct"].extend(train_metrics["num_correct"])
+            tier_train_metrics["losses"].extend(train_metrics["losses"])
+
+            tier_test_metrics["num_samples"].extend(test_metrics["num_samples"])
+            tier_test_metrics["num_correct"].extend(test_metrics["num_correct"])
+            tier_test_metrics["losses"].extend(test_metrics["losses"])
+
+        train_metrics = tier_train_metrics
+        test_metrics = tier_test_metrics
 
         # test on training dataset
         train_acc = sum(train_metrics["num_correct"]) / sum(train_metrics["num_samples"])
