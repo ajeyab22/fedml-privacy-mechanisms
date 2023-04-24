@@ -22,6 +22,7 @@ train_args:
   client_optimizer: sgd
   learning_rate: 0.03
   weight_decay: 0.001
+  encryption_scheme:"Homomorphic"
 
 validation_args:
   frequency_of_the_test: 5

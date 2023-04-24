@@ -3,12 +3,14 @@ import logging
 import random
 
 import numpy as np
+from Pyfhel import Pyfhel
 import torch
 import wandb
 
 from fedml import mlops
 from fedml.ml.trainer.trainer_creator import create_model_trainer
 from .client import Client
+from torchdp import privacy_engine
 
 import os,sys
 import subprocess
@@ -124,6 +126,24 @@ class FedAvgAPI(object):
         self._setup_clients(
             train_data_local_num_dict, train_data_local_dict, test_data_local_dict, self.model_trainer,
         )
+        
+        self.HE = Pyfhel(key_gen=True, context_params={
+            'scheme': 'CKKS', 
+            'n': 2**15, # For CKKS, n/2 values can be encoded in a single ciphertext.
+            'scale': 2**30,
+            'qi_sizes': [60]+ [30]*8 +[60]  # Number of bits of each prime in the chain.
+        })
+        self.HE.relinKeyGen()
+        epsilon = 1.0
+        delta = 1e-5
+
+        self.privacy_engine = privacy_engine.PrivacyEngine(
+            module=None,
+            sample_rate=None,
+            epochs=1,
+            target_epsilon=epsilon,
+            target_delta=delta,
+        )
 
     def _setup_clients(
         self, train_data_local_num_dict, train_data_local_dict, test_data_local_dict, model_trainer,
@@ -141,7 +161,60 @@ class FedAvgAPI(object):
             )
             self.client_list.append(c)
         logging.info("############setup_clients (END)#############")
-
+        
+    def encrypt_arr(self, weights):
+        if self.args.encryption_scheme=="Homomorphic":
+            
+            new_dict={}
+            for k,v in weights.items():
+                
+                if len(list(v.size()))==1:
+                    print("HERE1",k)
+                    new_dict[k] = (list(v.size())[0],self.HE.encryptFrac(np.array(v, dtype=np.float64)))                    
+                elif len(list(v.size()))==2:
+                    print("HERE2",k)
+                    
+                    temp1=[]
+                    for i in range(list(v.size())[0]):
+                        l=list(v.size())[1]
+                        temp1.append((l,self.HE.encryptFrac(np.array(v[i], dtype=np.float64))))
+                    new_dict[k] =temp1
+                elif len(list(v.size()))==4:
+                    print("HERE4",k)
+                    
+                    temp1=[]
+                    for i in range(list(v.size())[0]):
+                        temp2=[]
+                        for j in range(list(v.size())[1]):
+                            temp3=[]
+                            for k in range(list(v.size())[2]):
+                                l=list(v.size())[3]
+                                temp3.append((l,self.HE.encryptFrac(np.array(v[i][j][k], dtype=np.float64))))
+                            temp2.append(temp3)
+                        temp1.append(temp2)  
+                    new_dict[k] = temp1
+                            
+                #new_dict[k] = self.HE.encryptFrac(np.array(v, dtype=np.float64))
+            return weights
+        elif self.args.encryption_scheme=="DiffPrivacy":
+            new_dict={}
+            for k,v in weights.items():
+                new_dict[k]=self.privacy_engine.attach(v)
+            return new_dict
+        else:
+            print("No encryption done")
+            return weights
+        
+    
+    def decrypt_arr(self, w_global):
+        if self.args.encryption_scheme=="Homomorphic":
+            self.HE.decryptFrac()
+        elif self.args.encryption_scheme=="DiffPrivacy":
+            print("Differential Privacy encryption")
+        else:
+            print("No decryption done")
+            return w_global
+        
 
     def train(self):
         logging.info("self.model_trainer = {}".format(self.model_trainer))
@@ -187,12 +260,13 @@ class FedAvgAPI(object):
                 w = client.train(copy.deepcopy(w_global))
                 mlops.event("train", event_started=False, event_value="{}_{}".format(str(round_idx), str(idx)))
                 # self.logging.info("local weights = " + str(w))
+                w=self.encrypt_arr(w)
                 w_locals.append((client.get_sample_number(), copy.deepcopy(w)))
 
             # update global weights
             mlops.event("agg", event_started=True, event_value=str(round_idx))
             w_global = self._aggregate(w_locals)
-
+            #w_global=self.decrypt_arr(w_global)
             self.model_trainer.set_model_params(w_global)
             mlops.event("agg", event_started=False, event_value=str(round_idx))
 
@@ -358,11 +432,13 @@ class FedAvgAPI(object):
             training_num += sample_num
 
         (sample_num, averaged_params) = w_locals[0]
+        print("Line 391",averaged_params)
         for k in averaged_params.keys():
             for i in range(0, len(w_locals)):
                 local_sample_number, local_model_params = w_locals[i]
                 w = local_sample_number / training_num
                 if i == 0:
+                    print("Line 417",k,local_model_params[k],local_model_params[k]*w)
                     averaged_params[k] = local_model_params[k] * w
                 else:
                     averaged_params[k] += local_model_params[k] * w
