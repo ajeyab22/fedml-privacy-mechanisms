@@ -83,12 +83,12 @@ class FedAvgAPI(object):
         # The first 2 parameters are used. Remaining credits from comm_round are assgined to last
         self.credits_ratio = [0.5, 0.3, 0.2]
 
-        print("DreamFEDML: The given credits ratio is ", self.credits_ratio)
+        # print("DreamFEDML: The given credits ratio is ", self.credits_ratio)
         self.credits = list(map(lambda x: int(x*self.global_rounds), self.credits_ratio))
         
         self.credits[-1] = self.global_rounds - sum(self.credits[:-1])
 
-        print("DreamFEDML: The given credits are ", self.credits," for total ", self.global_rounds)
+        # print("DreamFEDML: The given credits are ", self.credits," for total ", self.global_rounds)
         
         # The below parameter is to check for update prob based on config file value
         self.update_prob = self.args.frequency_of_the_test
@@ -108,14 +108,14 @@ class FedAvgAPI(object):
                 self.client_type_list.append('M')   
             self.client_tier_dict[self.client_type_list[client_idx]].append(client_idx)
 
-        print("Dream FEDML: Number of High clients: ", len(self.client_tier_dict['H']),\
-               " and are ", self.client_tier_dict['H'])
+        # print("Dream FEDML: Number of High clients: ", len(self.client_tier_dict['H']),\
+        #        " and are ", self.client_tier_dict['H'])
         
-        print("Dream FEDML: Number of Medium clients: ", len(self.client_tier_dict['M']),\
-               " and are ", self.client_tier_dict['M'])
+        # print("Dream FEDML: Number of Medium clients: ", len(self.client_tier_dict['M']),\
+        #        " and are ", self.client_tier_dict['M'])
         
-        print("Dream FEDML: Number of Slow clients: ", len(self.client_tier_dict['L']),\
-               " and are ", self.client_tier_dict['L'])
+        # print("Dream FEDML: Number of Slow clients: ", len(self.client_tier_dict['L']),\
+        #        " and are ", self.client_tier_dict['L'])
 
         logging.info("model = {}".format(model))
 
@@ -161,24 +161,21 @@ class FedAvgAPI(object):
 
     def encrypt_arr(self, weights,idx):
         if self.args.encryption_scheme=="Homomorphic":
-            print("Pyfhel encryption is used")
+            print("Pyfhel encryption privacy mechanism is used")
             
             new_dict={}
             # conv1darray = [("conv2d_1.weight" , weights["conv2d_1.weight"])]
             for k,v in weights.items():
                 if k=="conv2d_1.weight" or k=="conv2d_1.bias":                
                     if len(list(v.size()))==1:
-                        print("HERE1",k)
                         new_dict[k] = self.HE.encryptFrac(np.array(v, dtype=np.float64))                    
-                    elif len(list(v.size()))==2:
-                        print("HERE2",k)                        
+                    elif len(list(v.size()))==2:                      
                         temp1=[]
                         for i in range(list(v.size())[0]):
                             # l=list(v.size())[1]
                             temp1.append(self.HE.encryptFrac(np.array(v[i], dtype=np.float64)))
                         new_dict[k] =temp1
-                    elif len(list(v.size()))==4:
-                        print("HERE4",k, list(v.size()))                        
+                    elif len(list(v.size()))==4:                      
                         temp1=[]
                         for i in range(list(v.size())[0]):
                             temp2=[]
@@ -193,17 +190,15 @@ class FedAvgAPI(object):
                 else:
                     new_dict[k]=v
 
-            print(new_dict.keys())                            
-            #new_dict[k] = self.HE.encryptFrac(np.array(v, dtype=np.float64))
-            # return weights
             return new_dict
         elif self.args.encryption_scheme=="DiffPrivacy":
+            print("Differential privacy mechanism is used")
+            
             new_dict={}
             epsilon=1.0
             for k,v in weights.items():
                 data_np=v.numpy()
                 new_dict[k]=torch.from_numpy(self.add_noise(data_np, epsilon, idx))
-                
             return new_dict
         else:
             print("No encryption done")
@@ -426,7 +421,6 @@ class FedAvgAPI(object):
         for i in range(num_tier):
             array.append(tier_acc[i])
         A = self.argsort(array)
-        print("Dream FEDML: ",tier_acc, A)
         D=num_tier*(num_tier+1)/2
 
         for i in range(1, num_tier+1):
@@ -448,12 +442,11 @@ class FedAvgAPI(object):
             training_num += sample_num
 
         (sample_num, averaged_params) = w_locals[0]
-        # print("Line 391",averaged_params)
         for k in averaged_params.keys():
             for i in range(0, len(w_locals)):
                 local_sample_number, local_model_params = w_locals[i]
                 w = local_sample_number / training_num
-                if self.args.encryption_scheme != "none":
+                if self.args.encryption_scheme == "Homomorphic":
                     if k=="conv2d_1.weight":
                         for a in range(len(averaged_params[k])):
                                 for b in range(len(averaged_params[k][0])):
@@ -464,18 +457,15 @@ class FedAvgAPI(object):
                                             averaged_params[k][a][b][c] += local_model_params[k][a][b][c] * w                
                     else:
                         if i == 0:
-                            # print("Line 417",k,local_model_params[k],local_model_params[k]*w)
                             averaged_params[k] = local_model_params[k] * w
                         else:
                             averaged_params[k] += local_model_params[k] * w
                 else:
                         if i == 0:
-                            # print("Line 417",k,local_model_params[k],local_model_params[k]*w)
                             averaged_params[k] = local_model_params[k] * w
                         else:
                             averaged_params[k] += local_model_params[k] * w
         
-        print("Dream FEDML: Line 440 aggregate completed")
         return averaged_params
 
     def _aggregate_noniid_avg(self, w_locals):
