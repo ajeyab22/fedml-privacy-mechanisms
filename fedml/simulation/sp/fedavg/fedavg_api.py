@@ -156,6 +156,7 @@ class FedAvgAPI(object):
         
     def encrypt_arr(self, weights):
         if self.args.encryption_scheme=="Homomorphic":
+            print("Pyfhel encryption is used")
             
             new_dict={}
             # conv1darray = [("conv2d_1.weight" , weights["conv2d_1.weight"])]
@@ -265,6 +266,8 @@ class FedAvgAPI(object):
                 # self.logging.info("local weights = " + str(w))
                 if self.args.encryption_scheme != "none":
                     w=self.encrypt_arr(w)
+                else:
+                    print("No encryption scheme is used")
                 w_locals.append((client.get_sample_number(), copy.deepcopy(w)))
 
             # update global weights
