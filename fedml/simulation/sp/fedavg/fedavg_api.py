@@ -97,7 +97,8 @@ class FedAvgAPI(object):
 
         # The below parameter is to divide the clients into tiers based on their data size
         # If a client has data size between threshold[1] (exclusive) and threshold[2] (invlusive), it is medium
-        self.threshold = [0, 20, 80]
+        if self.args.model=="cnn": self.threshold = [0, 20, 80]
+        elif self.args.model=="lr": self.threshold = [0, 12, 50]
 
         for client_idx in range(self.client_total):
             if (self.train_data_local_num_dict[client_idx] <= self.threshold[1]):
@@ -108,14 +109,14 @@ class FedAvgAPI(object):
                 self.client_type_list.append('M')   
             self.client_tier_dict[self.client_type_list[client_idx]].append(client_idx)
 
-        # print("Dream FEDML: Number of High clients: ", len(self.client_tier_dict['H']),\
-        #        " and are ", self.client_tier_dict['H'])
+        print("Dream FEDML: Number of High clients: ", len(self.client_tier_dict['H']),\
+               " and are ", self.client_tier_dict['H'])
         
-        # print("Dream FEDML: Number of Medium clients: ", len(self.client_tier_dict['M']),\
-        #        " and are ", self.client_tier_dict['M'])
+        print("Dream FEDML: Number of Medium clients: ", len(self.client_tier_dict['M']),\
+               " and are ", self.client_tier_dict['M'])
         
-        # print("Dream FEDML: Number of Slow clients: ", len(self.client_tier_dict['L']),\
-        #        " and are ", self.client_tier_dict['L'])
+        print("Dream FEDML: Number of Slow clients: ", len(self.client_tier_dict['L']),\
+               " and are ", self.client_tier_dict['L'])
 
         logging.info("model = {}".format(model))
 
@@ -153,10 +154,11 @@ class FedAvgAPI(object):
             self.client_list.append(c)
         logging.info("############setup_clients (END)#############")
         
-    def add_noise(self, data, epsilon, seed):
-        sensitivity = np.abs(np.diff(data)).max()/10
+    def add_noise(self, data, seed):
         np.random.seed(seed)
-        noise = np.random.laplace(scale=sensitivity/epsilon, size=data.shape)
+        diffs = np.abs(np.diff(data))
+        sensitivity = np.mean(diffs)
+        noise = np.random.laplace(scale=sensitivity/10, size=data.shape)
         return data + noise
 
     def encrypt_arr(self, weights,idx):
@@ -166,23 +168,21 @@ class FedAvgAPI(object):
             new_dict={}
             # conv1darray = [("conv2d_1.weight" , weights["conv2d_1.weight"])]
             for k,v in weights.items():
-                if k=="conv2d_1.weight" or k=="conv2d_1.bias":                
+                if k=="conv2d_1.weight" or k=="conv2d_1.bias" or k=="linear.bias" or k=="linear.weight" :                
                     if len(list(v.size()))==1:
                         new_dict[k] = self.HE.encryptFrac(np.array(v, dtype=np.float64))                    
-                    elif len(list(v.size()))==2:                      
+                    elif len(list(v.size()))==2:      
                         temp1=[]
                         for i in range(list(v.size())[0]):
-                            # l=list(v.size())[1]
                             temp1.append(self.HE.encryptFrac(np.array(v[i], dtype=np.float64)))
                         new_dict[k] =temp1
-                    elif len(list(v.size()))==4:                      
+                    elif len(list(v.size()))==4:      
                         temp1=[]
                         for i in range(list(v.size())[0]):
                             temp2=[]
                             for j in range(list(v.size())[1]):
                                 temp3=[]
                                 for m in range(list(v.size())[2]):
-                                    # l=list(v.size())[3]
                                     temp3.append(self.HE.encryptFrac(np.array(v[i][j][m], dtype=np.float64)))
                                 temp2.append(temp3)
                             temp1.append(temp2)  
@@ -195,10 +195,9 @@ class FedAvgAPI(object):
             print("Differential privacy mechanism is used")
             
             new_dict={}
-            epsilon=1.0
             for k,v in weights.items():
                 data_np=v.numpy()
-                new_dict[k]=torch.from_numpy(self.add_noise(data_np, epsilon, idx))
+                new_dict[k]=torch.from_numpy(self.add_noise(data_np,  idx))
             return new_dict
         else:
             print("No encryption done")
@@ -207,16 +206,24 @@ class FedAvgAPI(object):
     
     def decrypt_arr(self, w_global):
         if self.args.encryption_scheme=="Homomorphic":
-            for a in range(len(w_global["conv2d_1.weight"])):
-                    for b in range(len(w_global["conv2d_1.weight"][0])):
-                        for c in range(len(w_global["conv2d_1.weight"][0][0])):
-                            w_global["conv2d_1.weight"][a][b][c] = self.HE.decryptFrac(w_global["conv2d_1.weight"][a][b][c])[:3]
-            w_global["conv2d_1.weight"] = torch.FloatTensor(w_global["conv2d_1.weight"])
-            w_global["conv2d_1.bias"] = self.HE.decryptFrac(w_global["conv2d_1.bias"])[:32]
-            w_global["conv2d_1.bias"] = torch.FloatTensor(w_global["conv2d_1.bias"])
+            if self.args.model=="lr":
+                w_global["linear.bias"] = self.HE.decryptFrac(w_global["linear.bias"])[:10]
+                w_global["linear.bias"] = torch.FloatTensor(w_global["linear.bias"])
+                for a in range(len(w_global["linear.weight"])):
+                    w_global["linear.weight"][a] = self.HE.decryptFrac(w_global["linear.weight"][a])[:784]
+                w_global["linear.weight"] = torch.FloatTensor(w_global["linear.weight"])
+                
+            elif self.args.model=="cnn":
+                for a in range(len(w_global["conv2d_1.weight"])):
+                        for b in range(len(w_global["conv2d_1.weight"][0])):
+                            for c in range(len(w_global["conv2d_1.weight"][0][0])):
+                                w_global["conv2d_1.weight"][a][b][c] = self.HE.decryptFrac(w_global["conv2d_1.weight"][a][b][c])[:3]
+                w_global["conv2d_1.weight"] = torch.FloatTensor(w_global["conv2d_1.weight"])
+                w_global["conv2d_1.bias"] = self.HE.decryptFrac(w_global["conv2d_1.bias"])[:32]
+                w_global["conv2d_1.bias"] = torch.FloatTensor(w_global["conv2d_1.bias"])
             return w_global 
         elif self.args.encryption_scheme=="DiffPrivacy":
-            print("Differential Privacy encryption")
+            print("No Differential Privacy decryption")
             return w_global
         else:
             print("No decryption done")
@@ -266,7 +273,6 @@ class FedAvgAPI(object):
                 mlops.event("train", event_started=True, event_value="{}_{}".format(str(round_idx), str(idx)))
                 w = client.train(copy.deepcopy(w_global))
                 mlops.event("train", event_started=False, event_value="{}_{}".format(str(round_idx), str(idx)))
-                # self.logging.info("local weights = " + str(w))
                 if self.args.encryption_scheme == "DiffPrivacy" or self.args.encryption_scheme == "Homomorphic":
                     w=self.encrypt_arr(w,idx)
                 else:
@@ -281,8 +287,6 @@ class FedAvgAPI(object):
             self.model_trainer.set_model_params(w_global)
             mlops.event("agg", event_started=False, event_value=str(round_idx))
 
-            # test results
-            # at last round
             if round_idx == self.args.comm_round - 1:
                 self._local_test_on_all_clients(round_idx)
             # per {frequency_of_the_test} round
@@ -454,7 +458,13 @@ class FedAvgAPI(object):
                                         if i == 0:
                                             averaged_params[k][a][b][c] = local_model_params[k][a][b][c] * w
                                         else:
-                                            averaged_params[k][a][b][c] += local_model_params[k][a][b][c] * w                
+                                            averaged_params[k][a][b][c] += local_model_params[k][a][b][c] * w      
+                    elif k=="linear.weight":
+                        for a in range(len(averaged_params[k])):
+                            if i == 0:
+                                averaged_params[k][a] = local_model_params[k][a] * w
+                            else:
+                                averaged_params[k][a] += local_model_params[k][a] * w 
                     else:
                         if i == 0:
                             averaged_params[k] = local_model_params[k] * w
