@@ -15,6 +15,7 @@ import os,sys
 import subprocess
 import glob
 from os import path
+from functools import reduce
 
 # import pandas as pd
 # import seaborn as sns
@@ -134,8 +135,6 @@ class FedAvgAPI(object):
         })
         self.HE.relinKeyGen()
         
-        epsilon = 1.0
-        delta = 1e-5
 
     def _setup_clients(
         self, train_data_local_num_dict, train_data_local_dict, test_data_local_dict, model_trainer,
@@ -154,7 +153,13 @@ class FedAvgAPI(object):
             self.client_list.append(c)
         logging.info("############setup_clients (END)#############")
         
-    def encrypt_arr(self, weights):
+    def add_noise(self, data, epsilon, seed):
+        sensitivity = np.abs(np.diff(data)).max()/10
+        np.random.seed(seed)
+        noise = np.random.laplace(scale=sensitivity/epsilon, size=data.shape)
+        return data + noise
+
+    def encrypt_arr(self, weights,idx):
         if self.args.encryption_scheme=="Homomorphic":
             print("Pyfhel encryption is used")
             
@@ -194,8 +199,11 @@ class FedAvgAPI(object):
             return new_dict
         elif self.args.encryption_scheme=="DiffPrivacy":
             new_dict={}
+            epsilon=1.0
             for k,v in weights.items():
-                new_dict[k]=self.privacy_engine.attach(v)
+                data_np=v.numpy()
+                new_dict[k]=torch.from_numpy(self.add_noise(data_np, epsilon, idx))
+                
             return new_dict
         else:
             print("No encryption done")
@@ -264,8 +272,8 @@ class FedAvgAPI(object):
                 w = client.train(copy.deepcopy(w_global))
                 mlops.event("train", event_started=False, event_value="{}_{}".format(str(round_idx), str(idx)))
                 # self.logging.info("local weights = " + str(w))
-                if self.args.encryption_scheme != "none":
-                    w=self.encrypt_arr(w)
+                if self.args.encryption_scheme == "DiffPrivacy" or self.args.encryption_scheme == "Homomorphic":
+                    w=self.encrypt_arr(w,idx)
                 else:
                     print("No encryption scheme is used")
                 w_locals.append((client.get_sample_number(), copy.deepcopy(w)))
@@ -273,7 +281,7 @@ class FedAvgAPI(object):
             # update global weights
             mlops.event("agg", event_started=True, event_value=str(round_idx))
             w_global = self._aggregate(w_locals)
-            if self.args.encryption_scheme != "none":
+            if self.args.encryption_scheme == "DiffPrivacy" or self.args.encryption_scheme == "Homomorphic":
                 w_global=self.decrypt_arr(w_global)
             self.model_trainer.set_model_params(w_global)
             mlops.event("agg", event_started=False, event_value=str(round_idx))
