@@ -19,6 +19,7 @@ from ...constants import FEDML_TRAINING_PLATFORM_SIMULATION, FEDML_TRAINING_PLAT
 from ...cli.server_deployment.server_constants import ServerConstants
 
 from ..distributed.communication.mqtt.mqtt_manager import MqttManager
+from ..distributed.communication.s3.remote_storage import S3Storage
 
 from .mlops_metrics import MLOpsMetrics
 from .mlops_profiler_event import MLOpsProfilerEvent
@@ -27,6 +28,7 @@ from .mlops_status import MLOpsStatus
 from .mlops_runtime_log import MLOpsRuntimeLog
 from .mlops_runtime_log_daemon import MLOpsRuntimeLogProcessor
 from .mlops_runtime_log_daemon import MLOpsRuntimeLogDaemon
+from ...cli.edge_deployment.client_data_interface import FedMLClientDataInterface
 
 FEDML_MLOPS_API_RESPONSE_SUCCESS_CODE = "SUCCESS"
 
@@ -141,7 +143,6 @@ def event(event_name, event_started=True, event_value=None, event_edge_id=None):
         return
 
     setup_log_mqtt_mgr()
-    wait_log_mqtt_connected()
 
     if event_started:
         MLOpsStore.mlops_event.log_event_started(event_name, event_value, event_edge_id)
@@ -172,19 +173,17 @@ def log(metrics: dict, commit=True):
         #     k = "round_idx_" + k
         MLOpsStore.mlops_log_metrics[k] = v
     MLOpsStore.mlops_log_metrics["run_id"] = str(MLOpsStore.mlops_run_id)
-    MLOpsStore.mlops_log_metrics["timestamp"] = time.time()
+    MLOpsStore.mlops_log_metrics["timestamp"] = float(time.time_ns() / 1000 / 1000 * 1.0)
     MLOpsStore.mlops_log_metrics_lock.release()
 
     logging.info("log metrics {}".format(json.dumps(MLOpsStore.mlops_log_metrics)))
 
     if commit:
         setup_log_mqtt_mgr()
-        wait_log_mqtt_connected()
         MLOpsStore.mlops_log_metrics_lock.acquire()
         MLOpsStore.mlops_metrics.report_server_training_metric(MLOpsStore.mlops_log_metrics)
         MLOpsStore.mlops_log_metrics.clear()
         MLOpsStore.mlops_log_metrics_lock.release()
-        release_log_mqtt_mgr()
 
 
 def log_training_status(status, run_id=None):
@@ -202,12 +201,10 @@ def log_training_status(status, run_id=None):
     logging.info("log training status {}".format(status))
 
     setup_log_mqtt_mgr()
-    wait_log_mqtt_connected()
     if mlops_parrot_enabled(MLOpsStore.mlops_args):
         MLOpsStore.mlops_metrics.broadcast_client_training_status(MLOpsStore.mlops_edge_id, status)
     else:
         MLOpsStore.mlops_metrics.report_client_training_status(MLOpsStore.mlops_edge_id, status)
-    release_log_mqtt_mgr()
 
 
 def log_aggregation_status(status, run_id=None):
@@ -225,7 +222,6 @@ def log_aggregation_status(status, run_id=None):
     logging.info("log aggregation status {}".format(status))
 
     setup_log_mqtt_mgr()
-    wait_log_mqtt_connected()
     if mlops_parrot_enabled(MLOpsStore.mlops_args):
         device_role = "simulator"
     else:
@@ -244,7 +240,6 @@ def log_aggregation_status(status, run_id=None):
                                                                                          MLOpsStore.mlops_edge_id)
     else:
         MLOpsStore.mlops_metrics.report_server_training_status(MLOpsStore.mlops_run_id, status, role=device_role)
-    release_log_mqtt_mgr()
 
 
 def log_training_finished_status(run_id=None):
@@ -264,11 +259,28 @@ def log_training_finished_status(run_id=None):
     logging.info("log training inner status {}".format(ClientConstants.MSG_MLOPS_CLIENT_STATUS_FINISHED))
 
     setup_log_mqtt_mgr()
-    wait_log_mqtt_connected()
+    MLOpsStore.mlops_metrics.broadcast_client_training_status(MLOpsStore.mlops_edge_id,
+                                                              ClientConstants.MSG_MLOPS_CLIENT_STATUS_FINISHED)
     MLOpsStore.mlops_metrics.report_client_id_status(MLOpsStore.mlops_run_id,
                                                      MLOpsStore.mlops_edge_id,
                                                      ClientConstants.MSG_MLOPS_CLIENT_STATUS_FINISHED)
-    release_log_mqtt_mgr()
+
+def send_exit_train_msg(run_id=None):
+    if not mlops_enabled(MLOpsStore.mlops_args):
+        return
+
+    set_realtime_params()
+
+    if not MLOpsStore.mlops_bind_result:
+        return
+
+    run_id_param = run_id
+    if run_id is None:
+        run_id_param = MLOpsStore.mlops_run_id
+
+    setup_log_mqtt_mgr()
+    MLOpsStore.mlops_metrics.client_send_exit_train_msg(run_id_param, MLOpsStore.mlops_edge_id,
+                                                        ClientConstants.MSG_MLOPS_CLIENT_STATUS_FAILED)
 
 
 def log_training_failed_status(run_id=None):
@@ -288,11 +300,11 @@ def log_training_failed_status(run_id=None):
     logging.info("log training inner status {}".format(ClientConstants.MSG_MLOPS_CLIENT_STATUS_FAILED))
 
     setup_log_mqtt_mgr()
-    wait_log_mqtt_connected()
+    MLOpsStore.mlops_metrics.broadcast_client_training_status(MLOpsStore.mlops_edge_id,
+                                                              ClientConstants.MSG_MLOPS_CLIENT_STATUS_FAILED)
     MLOpsStore.mlops_metrics.report_client_id_status(MLOpsStore.mlops_run_id,
                                                      MLOpsStore.mlops_edge_id,
                                                      ClientConstants.MSG_MLOPS_CLIENT_STATUS_FAILED)
-    release_log_mqtt_mgr()
 
 
 def log_aggregation_finished_status(run_id=None):
@@ -312,10 +324,10 @@ def log_aggregation_finished_status(run_id=None):
     logging.info("log aggregation inner status {}".format(ServerConstants.MSG_MLOPS_SERVER_STATUS_FINISHED))
 
     setup_log_mqtt_mgr()
-    wait_log_mqtt_connected()
+    MLOpsStore.mlops_metrics.broadcast_server_training_status(MLOpsStore.mlops_run_id,
+                                                              ServerConstants.MSG_MLOPS_SERVER_STATUS_FINISHED)
     MLOpsStore.mlops_metrics.report_server_id_status(MLOpsStore.mlops_run_id,
                                                      ServerConstants.MSG_MLOPS_SERVER_STATUS_FINISHED)
-    release_log_mqtt_mgr()
 
 
 def log_aggregation_failed_status(run_id=None):
@@ -334,10 +346,10 @@ def log_aggregation_failed_status(run_id=None):
     # logging.info("log aggregation inner status {}".format(ServerConstants.MSG_MLOPS_SERVER_STATUS_FAILED))
 
     setup_log_mqtt_mgr()
-    wait_log_mqtt_connected()
+    MLOpsStore.mlops_metrics.broadcast_server_training_status(MLOpsStore.mlops_run_id,
+                                                              ServerConstants.MSG_MLOPS_SERVER_STATUS_FAILED)
     MLOpsStore.mlops_metrics.report_server_id_status(MLOpsStore.mlops_run_id,
                                                      ServerConstants.MSG_MLOPS_SERVER_STATUS_FAILED)
-    release_log_mqtt_mgr()
 
 
 def log_aggregated_model_info(round_index, model_url):
@@ -351,20 +363,83 @@ def log_aggregated_model_info(round_index, model_url):
     if not MLOpsStore.mlops_bind_result:
         return
 
-    logging.info("log aggregated mode info {}".format(model_url))
+    logging.info("log aggregated model info {}".format(model_url))
 
     setup_log_mqtt_mgr()
-    wait_log_mqtt_connected()
     model_info = {
         "run_id": MLOpsStore.mlops_run_id,
         "round_idx": round_index,
         "global_aggregated_model_s3_address": model_url,
     }
     MLOpsStore.mlops_metrics.report_aggregated_model_info(model_info)
-    release_log_mqtt_mgr()
 
 
-def log_client_model_info(round_index, model_url):
+def log_training_model_net_info(model_net, dummy_input_tensor):
+    if model_net is None:
+        return None
+    if not mlops_enabled(MLOpsStore.mlops_args):
+        return None
+
+    set_realtime_params()
+
+    if not MLOpsStore.mlops_bind_result:
+        return None
+
+    s3_config = MLOpsStore.mlops_log_agent_config.get("s3_config", None)
+    if s3_config is None:
+        return None
+    s3_client = S3Storage(s3_config)
+    model_key = "fedml-model-net-run-{}-{}".format(str(MLOpsStore.mlops_run_id), str(uuid.uuid4()))
+    model_url = s3_client.write_model_net(model_key, model_net,
+                                          dummy_input_tensor, ClientConstants.get_model_cache_dir())
+
+    logging.info("log training model net info {}".format(model_url))
+
+    setup_log_mqtt_mgr()
+    model_info = {
+        "run_id": MLOpsStore.mlops_run_id,
+        "training_model_net_s3_address": model_url,
+    }
+    MLOpsStore.mlops_metrics.report_training_model_net_info(model_info)
+    return model_url
+
+
+def log_training_model_input_info(input_sizes, input_types):
+    if input_sizes is None or input_types is None:
+        return None
+    if not mlops_enabled(MLOpsStore.mlops_args):
+        return None
+
+    set_realtime_params()
+
+    if not MLOpsStore.mlops_bind_result:
+        return None
+
+    s3_config = MLOpsStore.mlops_log_agent_config.get("s3_config", None)
+    if s3_config is None:
+        return None
+    s3_client = S3Storage(s3_config)
+    model_key = "fedml-model-input-run-{}".format(str(MLOpsStore.mlops_run_id))
+    model_input_url = s3_client.write_model_input(model_key, input_sizes, input_types,
+                                                  ClientConstants.get_model_cache_dir())
+    logging.info(f"training model input: {model_input_url}")
+
+    return model_input_url
+
+
+def get_training_model_input_info(training_model_net_url, s3_config):
+    if s3_config is None:
+        return None, None
+
+    run_id = str(training_model_net_url).split("fedml-model-net-run-")[1].split("-")[0]
+    model_key = f"fedml-model-input-run-{run_id}"
+    s3_client = S3Storage(s3_config)
+    input_size, input_type = s3_client.read_model_input(model_key, ClientConstants.get_model_cache_dir())
+    logging.info(f"training model input size: {input_size}, input type: {input_type}")
+    return input_size, input_type
+
+
+def log_client_model_info(round_index, total_rounds, model_url):
     if model_url is None:
         return
     if not mlops_enabled(MLOpsStore.mlops_args):
@@ -375,10 +450,9 @@ def log_client_model_info(round_index, model_url):
     if not MLOpsStore.mlops_bind_result:
         return
 
-    logging.info("log client mode info {}".format(model_url))
+    logging.info("log client model info {}".format(model_url))
 
     setup_log_mqtt_mgr()
-    wait_log_mqtt_connected()
     model_info = {
         "run_id": MLOpsStore.mlops_run_id,
         "edge_id": MLOpsStore.mlops_edge_id,
@@ -386,7 +460,11 @@ def log_client_model_info(round_index, model_url):
         "client_model_s3_address": model_url,
     }
     MLOpsStore.mlops_metrics.report_client_model_info(model_info)
-    release_log_mqtt_mgr()
+
+    FedMLClientDataInterface.get_instance().save_running_job(MLOpsStore.mlops_run_id, MLOpsStore.mlops_edge_id,
+                                                             round_index,
+                                                             total_rounds,
+                                                             "Running")
 
 
 def log_sys_perf(sys_args=None):
@@ -398,6 +476,23 @@ def log_sys_perf(sys_args=None):
 
     MLOpsMetrics.report_sys_perf(MLOpsStore.mlops_args)
 
+
+def log_server_payload(run_id, edge_id, payload):
+    if not mlops_enabled(MLOpsStore.mlops_args):
+        return
+
+    set_realtime_params()
+
+    if not mlops_enabled(MLOpsStore.mlops_args):
+        return False
+
+    if not MLOpsStore.mlops_bind_result:
+        return
+
+    setup_log_mqtt_mgr()
+    topic = "fedml_{}_{}".format(run_id, edge_id)
+    logging.info("log json message, topic {}, payload {}.".format(topic, payload))
+    MLOpsStore.mlops_metrics.report_json_message(topic, payload)
 
 def log_round_info(total_rounds, round_index):
     if not mlops_enabled(MLOpsStore.mlops_args):
@@ -415,7 +510,6 @@ def log_round_info(total_rounds, round_index):
         MLOpsStore.mlops_log_round_start_time = time.time()
 
     setup_log_mqtt_mgr()
-    wait_log_mqtt_connected()
     round_info = {
         "run_id": MLOpsStore.mlops_run_id,
         "round_index": round_index,
@@ -424,7 +518,6 @@ def log_round_info(total_rounds, round_index):
     }
     logging.info("log round info {}".format(round_info))
     MLOpsStore.mlops_metrics.report_server_training_round_info(round_info)
-    release_log_mqtt_mgr()
 
 
 def create_project(project_name, api_key):
@@ -563,14 +656,6 @@ def setup_log_mqtt_mgr():
     if MLOpsStore.mlops_log_mqtt_lock is None:
         MLOpsStore.mlops_log_mqtt_lock = threading.Lock()
 
-    if MLOpsStore.mlops_log_mqtt_mgr is not None:
-        MLOpsStore.mlops_log_mqtt_lock.acquire()
-        MLOpsStore.mlops_log_mqtt_mgr.remove_disconnected_listener(on_log_mqtt_disconnected)
-        MLOpsStore.mlops_log_mqtt_is_connected = False
-        MLOpsStore.mlops_log_mqtt_mgr.disconnect()
-        MLOpsStore.mlops_log_mqtt_mgr = None
-        MLOpsStore.mlops_log_mqtt_lock.release()
-
     if len(MLOpsStore.mlops_log_agent_config) == 0:
         return
 
@@ -584,38 +669,39 @@ def setup_log_mqtt_mgr():
         MLOpsStore.mlops_log_agent_config["mqtt_config"]["MQTT_USER"],
         MLOpsStore.mlops_log_agent_config["mqtt_config"]["MQTT_PWD"],
         MLOpsStore.mlops_log_agent_config["mqtt_config"]["MQTT_KEEPALIVE"],
-        "Simulation_Link_" + str(uuid.uuid4()),
+        "FedML_MLOps_Metrics_{}_{}_{}".format(MLOpsStore.mlops_args.device_id,
+                                              str(MLOpsStore.mlops_edge_id),
+                                              str(uuid.uuid4()))
     )
     MLOpsStore.mlops_log_mqtt_mgr.add_connected_listener(on_log_mqtt_connected)
     MLOpsStore.mlops_log_mqtt_mgr.add_disconnected_listener(on_log_mqtt_disconnected)
     MLOpsStore.mlops_log_mqtt_mgr.connect()
     MLOpsStore.mlops_log_mqtt_mgr.loop_start()
 
+    if MLOpsStore.mlops_metrics is None:
+        MLOpsStore.mlops_metrics = MLOpsMetrics()
+        MLOpsStore.mlops_metrics.set_messenger(MLOpsStore.mlops_log_mqtt_mgr, MLOpsStore.mlops_args)
+
+    MLOpsStore.mlops_metrics.run_id = MLOpsStore.mlops_run_id
+    MLOpsStore.mlops_metrics.edge_id = MLOpsStore.mlops_edge_id
+
+    if MLOpsStore.mlops_event is None:
+        MLOpsStore.mlops_event = MLOpsProfilerEvent(MLOpsStore.mlops_args)
+        MLOpsStore.mlops_event.set_messenger(MLOpsStore.mlops_log_mqtt_mgr, MLOpsStore.mlops_args)
+
+    MLOpsStore.mlops_event.run_id = MLOpsStore.mlops_run_id
+    MLOpsStore.mlops_event.edge_id = MLOpsStore.mlops_edge_id
+
 
 def release_log_mqtt_mgr():
-    return
-    # if MLOpsStore.mlops_log_mqtt_mgr is not None:
-    #     MLOpsStore.mlops_log_mqtt_mgr.disconnect()
-    #     MLOpsStore.mlops_log_mqtt_mgr.loop_stop()
-    #
-    # MLOpsStore.mlops_log_mqtt_lock.acquire()
-    # if MLOpsStore.mlops_log_mqtt_mgr is not None:
-    #     MLOpsStore.mlops_log_mqtt_is_connected = False
-    # MLOpsStore.mlops_log_mqtt_lock.release()
+    if MLOpsStore.mlops_log_mqtt_mgr is not None:
+        MLOpsStore.mlops_log_mqtt_mgr.disconnect()
+        MLOpsStore.mlops_log_mqtt_mgr.loop_stop()
 
-
-def wait_log_mqtt_connected():
-    while True:
-        MLOpsStore.mlops_log_mqtt_lock.acquire()
-        if MLOpsStore.mlops_log_mqtt_is_connected is True \
-                and MLOpsStore.mlops_metrics is not None:
-            MLOpsStore.mlops_metrics.set_messenger(MLOpsStore.mlops_log_mqtt_mgr, MLOpsStore.mlops_args)
-            if MLOpsStore.mlops_event is not None:
-                MLOpsStore.mlops_event.set_messenger(MLOpsStore.mlops_log_mqtt_mgr, MLOpsStore.mlops_args)
-            MLOpsStore.mlops_log_mqtt_lock.release()
-            break
-        MLOpsStore.mlops_log_mqtt_lock.release()
-        time.sleep(0.01)
+    MLOpsStore.mlops_log_mqtt_lock.acquire()
+    if MLOpsStore.mlops_log_mqtt_mgr is not None:
+        MLOpsStore.mlops_log_mqtt_is_connected = False
+    MLOpsStore.mlops_log_mqtt_lock.release()
 
 
 def init_logs(args, edge_id):
@@ -658,7 +744,7 @@ def bind_simulation_device(args, userid, version="release"):
     service_config = dict()
     config_try_count = 0
     edge_id = 0
-    while config_try_count < 5:
+    while config_try_count < 1:
         try:
             mqtt_config, s3_config, mlops_config, docker_config = runner.fetch_configs()
             service_config["mqtt_config"] = mqtt_config
@@ -673,10 +759,10 @@ def bind_simulation_device(args, userid, version="release"):
             break
         except Exception as e:
             config_try_count += 1
-            time.sleep(0.5)
+            time.sleep(0)
             continue
 
-    if config_try_count >= 5:
+    if config_try_count >= 1:
         click.echo("\nNote: Internet is not connected. "
                    "Experimental tracking results will not be synchronized to the MLOps (open.fedml.ai).\n")
         return False
@@ -689,7 +775,7 @@ def bind_simulation_device(args, userid, version="release"):
     # Bind account id to the MLOps platform.
     register_try_count = 0
     edge_id = 0
-    while register_try_count < 5:
+    while register_try_count < 1:
         try:
             edge_id = runner.bind_account_and_device_id(
                 service_config["ml_ops_config"]["EDGE_BINDING_URL"],
@@ -700,7 +786,7 @@ def bind_simulation_device(args, userid, version="release"):
                 break
         except Exception as e:
             register_try_count += 1
-            time.sleep(3)
+            time.sleep(0)
             continue
 
     if edge_id <= 0:
@@ -740,7 +826,7 @@ def fetch_config(args, version="release"):
     service_config = dict()
     config_try_count = 0
     edge_id = 0
-    while config_try_count < 5:
+    while config_try_count < 1:
         try:
             mqtt_config, s3_config, mlops_config, docker_config = runner.fetch_configs()
             service_config["mqtt_config"] = mqtt_config
@@ -755,10 +841,10 @@ def fetch_config(args, version="release"):
             break
         except Exception as e:
             config_try_count += 1
-            time.sleep(0.5)
+            time.sleep(0)
             continue
 
-    if config_try_count >= 5:
+    if config_try_count >= 1:
         click.echo("\nNote: Internet is not connected. "
                    "Experimental tracking results will not be synchronized to the MLOps (open.fedml.ai).\n")
         return False
