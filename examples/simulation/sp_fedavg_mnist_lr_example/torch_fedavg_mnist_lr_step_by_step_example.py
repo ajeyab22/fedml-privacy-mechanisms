@@ -16,5 +16,10 @@ if __name__ == "__main__":
     model = fedml.model.create(args, output_dim)
 
     # start training
+    st = time.time()
     fedml_runner = FedMLRunner(args, device, dataset, model)
     fedml_runner.run()
+    et = time.time()
+    agg_time=et-st
+    print("Total time for running:"+str(agg_time)+" seconds")
+    

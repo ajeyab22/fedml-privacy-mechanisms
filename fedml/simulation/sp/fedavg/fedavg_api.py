@@ -14,6 +14,8 @@ from .client import Client
 import os,sys
 import subprocess
 import glob
+import math
+import time
 from os import path
 from functools import reduce
 
@@ -87,7 +89,6 @@ class FedAvgAPI(object):
         self.credits = list(map(lambda x: int(x*self.global_rounds), self.credits_ratio))
         
         self.credits[-1] = self.global_rounds - sum(self.credits[:-1])
-
         # print("DreamFEDML: The given credits are ", self.credits," for total ", self.global_rounds)
         
         # The below parameter is to check for update prob based on config file value
@@ -164,40 +165,30 @@ class FedAvgAPI(object):
     def encrypt_arr(self, weights,idx):
         if self.args.encryption_scheme=="Homomorphic":
             print("Pyfhel encryption privacy mechanism is used")
-            
             new_dict={}
-            # conv1darray = [("conv2d_1.weight" , weights["conv2d_1.weight"])]
+            num_params=0
             for k,v in weights.items():
-                if k=="conv2d_1.weight" or k=="conv2d_1.bias" or k=="linear.bias" or k=="linear.weight" :                
-                    if len(list(v.size()))==1:
-                        new_dict[k] = self.HE.encryptFrac(np.array(v, dtype=np.float64))                    
-                    elif len(list(v.size()))==2:      
-                        temp1=[]
-                        for i in range(list(v.size())[0]):
-                            temp1.append(self.HE.encryptFrac(np.array(v[i], dtype=np.float64)))
-                        new_dict[k] =temp1
-                    elif len(list(v.size()))==4:      
-                        temp1=[]
-                        for i in range(list(v.size())[0]):
-                            temp2=[]
-                            for j in range(list(v.size())[1]):
-                                temp3=[]
-                                for m in range(list(v.size())[2]):
-                                    temp3.append(self.HE.encryptFrac(np.array(v[i][j][m], dtype=np.float64)))
-                                temp2.append(temp3)
-                            temp1.append(temp2)  
-                        new_dict[k] = temp1
+                num_params+=math.prod(list(v.size()))
+                print("Line 171",k,list(v.size()))
+                if k=="linear_2.weight" or k=="linear_2.bias" or k=="linear_1.bias" or k=="conv2d_2.bias" or k=="conv2d_1.bias" or k=="conv2d_1.weight" or k=="linear.bias" or k=="linear.weight" :                                  
+                    new_dict[k] = self.HE.encryptFrac(np.ravel(v.numpy().astype(np.float64))) 
                 else:
                     new_dict[k]=v
-
+            print("Number of parameters in the model:",num_params)
             return new_dict
         elif self.args.encryption_scheme=="DiffPrivacy":
             print("Differential privacy mechanism is used")
             
             new_dict={}
+            num_params=0
+            
             for k,v in weights.items():
+                num_params+=math.prod(list(v.size()))
+                print("Line 189",k,list(v.size()))
                 data_np=v.numpy()
                 new_dict[k]=torch.from_numpy(self.add_noise(data_np,  idx))
+            print("Number of parameters in the model:",num_params)
+            
             return new_dict
         else:
             print("No encryption done")
@@ -209,18 +200,28 @@ class FedAvgAPI(object):
             if self.args.model=="lr":
                 w_global["linear.bias"] = self.HE.decryptFrac(w_global["linear.bias"])[:10]
                 w_global["linear.bias"] = torch.FloatTensor(w_global["linear.bias"])
-                for a in range(len(w_global["linear.weight"])):
-                    w_global["linear.weight"][a] = self.HE.decryptFrac(w_global["linear.weight"][a])[:784]
-                w_global["linear.weight"] = torch.FloatTensor(w_global["linear.weight"])
+                
+                w_global["linear.weight"] = self.HE.decryptFrac(w_global["linear.weight"])[:7840]
+                w_global["linear.weight"] = torch.FloatTensor(w_global["linear.weight"].reshape(10,784))
                 
             elif self.args.model=="cnn":
-                for a in range(len(w_global["conv2d_1.weight"])):
-                        for b in range(len(w_global["conv2d_1.weight"][0])):
-                            for c in range(len(w_global["conv2d_1.weight"][0][0])):
-                                w_global["conv2d_1.weight"][a][b][c] = self.HE.decryptFrac(w_global["conv2d_1.weight"][a][b][c])[:3]
-                w_global["conv2d_1.weight"] = torch.FloatTensor(w_global["conv2d_1.weight"])
+                w_global["conv2d_1.weight"] = self.HE.decryptFrac(w_global["conv2d_1.weight"])[:288]
+                w_global["conv2d_1.weight"] = torch.FloatTensor(w_global["conv2d_1.weight"].reshape(32,1,3,3))
+                
                 w_global["conv2d_1.bias"] = self.HE.decryptFrac(w_global["conv2d_1.bias"])[:32]
                 w_global["conv2d_1.bias"] = torch.FloatTensor(w_global["conv2d_1.bias"])
+                
+                w_global["conv2d_2.bias"] = self.HE.decryptFrac(w_global["conv2d_2.bias"])[:64]
+                w_global["conv2d_2.bias"] = torch.FloatTensor(w_global["conv2d_2.bias"])
+                
+                w_global["linear_2.bias"] = self.HE.decryptFrac(w_global["linear_2.bias"])[:62]
+                w_global["linear_2.bias"] = torch.FloatTensor(w_global["linear_2.bias"])
+                
+                w_global["linear_1.bias"] = self.HE.decryptFrac(w_global["linear_1.bias"])[:128]
+                w_global["linear_1.bias"] = torch.FloatTensor(w_global["linear_1.bias"])
+                
+                w_global["linear_2.weight"] = self.HE.decryptFrac(w_global["linear_2.weight"])[:7936]
+                w_global["linear_2.weight"] = torch.FloatTensor(w_global["linear_2.weight"].reshape(62,128))
             return w_global 
         elif self.args.encryption_scheme=="DiffPrivacy":
             print("No Differential Privacy decryption")
@@ -236,6 +237,27 @@ class FedAvgAPI(object):
         mlops.log_training_status(mlops.ClientConstants.MSG_MLOPS_CLIENT_STATUS_TRAINING)
         mlops.log_aggregation_status(mlops.ServerConstants.MSG_MLOPS_SERVER_STATUS_RUNNING)
         mlops.log_round_info(self.args.comm_round, -1)
+        agg_time=0
+        dec_time=0
+        
+        file_name="output"+str(self.args.encryption_scheme)+"_"+str(self.args.model)+"_"+str(self.args.dataset)
+        
+        f = open(file_name, 'w')
+        str_write="Model:"+str(self.args.model)+"\n"
+        str_write+="Dataset:"+str(self.args.dataset)+"\n"
+        str_write+="Encryption Scheme:"+str(self.args.encryption_scheme)+"\n"
+        str_write+="Epochs:"+str(self.args.epochs)+"\n"
+        str_write+="Number of Clients:"+str(self.args.client_num_in_total)+"\n"
+        str_write+="Number of Clients per round:"+str(self.args.client_num_per_round)+"\n"
+        str_write+="Number of rounds:"+str(self.args.comm_round)+"\n"
+        str_write+="Number of high clients:"+str(len(self.client_tier_dict['H']))+"\n"
+        str_write+="Number of medium clients:"+str(len(self.client_tier_dict['M']))+"\n"
+        str_write+="Number of low clients:"+str(len(self.client_tier_dict['L']))+"\n"
+        str_write+="Credits:"+str(','.join(str(v) for v in self.credits))+"\n"
+        
+        str_write+="#"*20+"\n"
+        str_write+="Round\tTier Accuracy\tTrain Accuracy\tTest Accuracy\n"
+        
         for round_idx in range(self.args.comm_round):
 
             logging.info("################Communication round : {}".format(round_idx))
@@ -256,6 +278,7 @@ class FedAvgAPI(object):
 
             logging.info("client_indexes = " + str(client_indexes))
 
+            enc_time=0
             for idx, client in enumerate(self.client_list):
                 # To ensure that idx is within client_indexes
                 if idx >= len(client_indexes):
@@ -274,27 +297,36 @@ class FedAvgAPI(object):
                 w = client.train(copy.deepcopy(w_global))
                 mlops.event("train", event_started=False, event_value="{}_{}".format(str(round_idx), str(idx)))
                 if self.args.encryption_scheme == "DiffPrivacy" or self.args.encryption_scheme == "Homomorphic":
+                    st = time.time()
                     w=self.encrypt_arr(w,idx)
+                    et = time.time()
+                    enc_time+=(et-st)
                 else:
                     print("No encryption scheme is used")
                 w_locals.append((client.get_sample_number(), copy.deepcopy(w)))
 
             # update global weights
             mlops.event("agg", event_started=True, event_value=str(round_idx))
+            st = time.time()
             w_global = self._aggregate(w_locals)
+            et = time.time()
+            agg_time+=(et-st)
             if self.args.encryption_scheme == "DiffPrivacy" or self.args.encryption_scheme == "Homomorphic":
+                st = time.time()
                 w_global=self.decrypt_arr(w_global)
+                et = time.time()
+                dec_time+=(et-st)
             self.model_trainer.set_model_params(w_global)
             mlops.event("agg", event_started=False, event_value=str(round_idx))
 
             if round_idx == self.args.comm_round - 1:
-                self._local_test_on_all_clients(round_idx)
+                (train_acc,test_acc)=self._local_test_on_all_clients(round_idx)
             # per {frequency_of_the_test} round
             elif round_idx % self.args.frequency_of_the_test == 0:
                 if self.args.dataset.startswith("stackoverflow"):
                     self._local_test_on_validation_set(round_idx)
                 else:
-                    self._local_test_on_all_clients(round_idx)
+                    (train_acc,test_acc)=self._local_test_on_all_clients(round_idx)
 
             if round_idx%self.update_prob==0 and round_idx>=self.update_prob and round_idx != self.args.comm_round - 1:
                 logging.info("Previous tierwise accuracies = %s" % str(self.tier_accuracy_prev))
@@ -308,13 +340,23 @@ class FedAvgAPI(object):
                 self.tier_accuracy= [0,0,0]
 
             mlops.log_round_info(self.args.comm_round, round_idx)
+            str_write+=str(round_idx)+"\t"+str(self.tier_accuracy[0])+","+str(self.tier_accuracy[1])+","+str(self.tier_accuracy[2])+"\t"
+            if round_idx == self.args.comm_round - 1 or round_idx % self.args.frequency_of_the_test == 0:
+                str_write+=str(train_acc)+"\t"+str(test_acc)+"\n"
+            else:
+                str_write+="-\t-\n"
+        str_write+="#"*20+"\n"
+        str_write+="Average time for aggregation:"+str(agg_time/self.args.comm_round)+" sec"+"\n"
+        str_write+="Average time for encryption:"+str(enc_time)+" sec"+"\n"
+        str_write+="Average time for decryption:"+str(dec_time/self.args.comm_round)+" sec"+"\n"
+        f.write(str_write)
+        f.close()
 
         print("DreamFEDML: Line 126 Model: "+str(self.args.model)+" Dataset: "\
               +str(self.args.dataset)+" Feature size of local weight: " + str(len(w_locals[0][1])))
         mlops.log_training_finished_status()
         mlops.log_aggregation_finished_status()
-
-
+        
         # filename1='log_loss.txt'
         # filename2 = 'log_acc.txt'
 
@@ -418,7 +460,6 @@ class FedAvgAPI(object):
         return result
 
     def change_probs(self,tier_acc):
-
         #num_tier=3-self.credits.count(0)
         num_tier=3
         array = []
@@ -450,31 +491,10 @@ class FedAvgAPI(object):
             for i in range(0, len(w_locals)):
                 local_sample_number, local_model_params = w_locals[i]
                 w = local_sample_number / training_num
-                if self.args.encryption_scheme == "Homomorphic":
-                    if k=="conv2d_1.weight":
-                        for a in range(len(averaged_params[k])):
-                                for b in range(len(averaged_params[k][0])):
-                                    for c in range(len(averaged_params[k][0][0])):
-                                        if i == 0:
-                                            averaged_params[k][a][b][c] = local_model_params[k][a][b][c] * w
-                                        else:
-                                            averaged_params[k][a][b][c] += local_model_params[k][a][b][c] * w      
-                    elif k=="linear.weight":
-                        for a in range(len(averaged_params[k])):
-                            if i == 0:
-                                averaged_params[k][a] = local_model_params[k][a] * w
-                            else:
-                                averaged_params[k][a] += local_model_params[k][a] * w 
-                    else:
-                        if i == 0:
-                            averaged_params[k] = local_model_params[k] * w
-                        else:
-                            averaged_params[k] += local_model_params[k] * w
+                if i == 0:
+                    averaged_params[k] = local_model_params[k] * w
                 else:
-                        if i == 0:
-                            averaged_params[k] = local_model_params[k] * w
-                        else:
-                            averaged_params[k] += local_model_params[k] * w
+                    averaged_params[k] += local_model_params[k] * w
         
         return averaged_params
 
@@ -588,6 +608,7 @@ class FedAvgAPI(object):
         mlops.log({"Test/Acc": test_acc, "round": round_idx})
         mlops.log({"Test/Loss": test_loss, "round": round_idx})
         logging.info(stats)
+        return (train_acc,test_acc)
 
 
     def _local_test_on_validation_set(self, round_idx):
