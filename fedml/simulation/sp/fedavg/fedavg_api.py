@@ -85,11 +85,9 @@ class FedAvgAPI(object):
         # The first 2 parameters are used. Remaining credits from comm_round are assgined to last
         self.credits_ratio = [0.5, 0.3, 0.2]
 
-        # print("DreamFEDML: The given credits ratio is ", self.credits_ratio)
         self.credits = list(map(lambda x: int(x*self.global_rounds), self.credits_ratio))
         
         self.credits[-1] = self.global_rounds - sum(self.credits[:-1])
-        # print("DreamFEDML: The given credits are ", self.credits," for total ", self.global_rounds)
         
         # The below parameter is to check for update prob based on config file value
         self.update_prob = self.args.frequency_of_the_test
@@ -109,15 +107,6 @@ class FedAvgAPI(object):
             else:
                 self.client_type_list.append('M')   
             self.client_tier_dict[self.client_type_list[client_idx]].append(client_idx)
-
-        print("Dream FEDML: Number of High clients: ", len(self.client_tier_dict['H']),\
-               " and are ", self.client_tier_dict['H'])
-        
-        print("Dream FEDML: Number of Medium clients: ", len(self.client_tier_dict['M']),\
-               " and are ", self.client_tier_dict['M'])
-        
-        print("Dream FEDML: Number of Slow clients: ", len(self.client_tier_dict['L']),\
-               " and are ", self.client_tier_dict['L'])
 
         logging.info("model = {}".format(model))
 
@@ -164,12 +153,11 @@ class FedAvgAPI(object):
 
     def encrypt_arr(self, weights,idx):
         if self.args.encryption_scheme=="Homomorphic":
-            print("Pyfhel encryption privacy mechanism is used")
+            print("Homomorhic encryption privacy mechanism is used")
             new_dict={}
             num_params=0
             for k,v in weights.items():
                 num_params+=math.prod(list(v.size()))
-                print("Line 171",k,list(v.size()))
                 if k=="linear_2.weight" or k=="linear_2.bias" or k=="linear_1.bias" or k=="conv2d_2.bias" or k=="conv2d_1.bias" or k=="conv2d_1.weight" or k=="linear.bias" or k=="linear.weight" :                                  
                     new_dict[k] = self.HE.encryptFrac(np.ravel(v.numpy().astype(np.float64))) 
                 else:
@@ -184,7 +172,6 @@ class FedAvgAPI(object):
             
             for k,v in weights.items():
                 num_params+=math.prod(list(v.size()))
-                print("Line 189",k,list(v.size()))
                 data_np=v.numpy()
                 new_dict[k]=torch.from_numpy(self.add_noise(data_np,  idx))
             print("Number of parameters in the model:",num_params)
@@ -256,7 +243,7 @@ class FedAvgAPI(object):
         str_write+="Credits:"+str(','.join(str(v) for v in self.credits))+"\n"
         
         str_write+="#"*20+"\n"
-        str_write+="Round\tTier Accuracy\tTrain Accuracy\tTest Accuracy\n"
+        str_write+="Round\t\t\tTier Accuracy\tTrain Accuracy\tTest Accuracy\n"
         
         for round_idx in range(self.args.comm_round):
 
