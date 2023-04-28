@@ -6,6 +6,7 @@ import numpy as np
 from Pyfhel import Pyfhel
 import torch
 import wandb
+import json
 
 from fedml import mlops
 from fedml.ml.trainer.trainer_creator import create_model_trainer
@@ -96,7 +97,7 @@ class FedAvgAPI(object):
 
         # The below parameter is to divide the clients into tiers based on their data size
         # If a client has data size between threshold[1] (exclusive) and threshold[2] (invlusive), it is medium
-        if self.args.model=="cnn": self.threshold = [0, 20, 80]
+        if self.args.model=="cnn": self.threshold = [0, 15, 45]
         elif self.args.model=="lr": self.threshold = [0, 12, 50]
 
         for client_idx in range(self.client_total):
@@ -175,7 +176,29 @@ class FedAvgAPI(object):
                 data_np=v.numpy()
                 new_dict[k]=torch.from_numpy(self.add_noise(data_np,  idx))
             print("Number of parameters in the model:",num_params)
-            
+            # if idx==0 and (self.args.model=="lr") :
+            #     file_name_="Noise_"+str(self.args.model)
+            #     f1 = open(file_name_, 'w')
+            #     str_w="Before adding noise:\n"
+            #     f1.write(str_w)
+            #     f1.writelines(str(weight) + '\n' for weight in weights["linear.bias"].tolist())
+            #     str_w="After adding noise:\n"
+            #     f1.write(str_w)
+            #     f1.writelines(str(weight) + '\n' for weight in new_dict["linear.bias"].tolist())
+            #     f1.close()
+            # elif idx==0 and (self.args.model=="cnn"):
+            #     file_name_="Noise_"+str(self.args.model)
+            #     f1 = open(file_name_, 'w')
+            #     str_w="Before adding noise:\n"
+            #     f1.write(str_w)
+            #     f1.writelines(str(weight) + '\n' for weight in weights["conv2d_1.bias"].tolist())
+                
+            #     str_w="After adding noise:\n"
+            #     f1.write(str_w)
+            #     f1.writelines(str(weight) + '\n' for weight in new_dict["conv2d_1.bias"].tolist())
+                
+            #     f1.close()
+                
             return new_dict
         else:
             print("No encryption done")
@@ -227,9 +250,7 @@ class FedAvgAPI(object):
         agg_time=0
         dec_time=0
         
-        file_name="output"+str(self.args.encryption_scheme)+"_"+str(self.args.model)+"_"+str(self.args.dataset)
         
-        f = open(file_name, 'w')
         str_write="Model:"+str(self.args.model)+"\n"
         str_write+="Dataset:"+str(self.args.dataset)+"\n"
         str_write+="Encryption Scheme:"+str(self.args.encryption_scheme)+"\n"
@@ -327,15 +348,17 @@ class FedAvgAPI(object):
                 self.tier_accuracy= [0,0,0]
 
             mlops.log_round_info(self.args.comm_round, round_idx)
-            str_write+=str(round_idx)+"\t"+str(self.tier_accuracy[0])+","+str(self.tier_accuracy[1])+","+str(self.tier_accuracy[2])+"\t"
+            str_write+=str(round_idx)+"\t"+str(self.tier_accuracy_prev[0])+","+str(self.tier_accuracy_prev[1])+","+str(self.tier_accuracy_prev[2])
             if round_idx == self.args.comm_round - 1 or round_idx % self.args.frequency_of_the_test == 0:
-                str_write+=str(train_acc)+"\t"+str(test_acc)+"\n"
+                str_write+="\t"+str(train_acc)+"\t"+str(test_acc)+"\n"
             else:
-                str_write+="-\t-\n"
+                str_write+="\t-\t-\n"
         str_write+="#"*20+"\n"
         str_write+="Average time for aggregation:"+str(agg_time/self.args.comm_round)+" sec"+"\n"
         str_write+="Average time for encryption:"+str(enc_time)+" sec"+"\n"
         str_write+="Average time for decryption:"+str(dec_time/self.args.comm_round)+" sec"+"\n"
+        file_name="output_"+str(self.args.encryption_scheme)+"_"+str(self.args.model)+"_"+str(self.args.dataset)+"_sensitivity0.1"
+        f = open(file_name, 'w')
         f.write(str_write)
         f.close()
 
@@ -644,5 +667,4 @@ class FedAvgAPI(object):
             mlops.log({"Test/Loss": test_loss, "round": round_idx})
         else:
             raise Exception("Unknown format to log metrics for dataset {}!" % self.args.dataset)
-
         logging.info(stats)
